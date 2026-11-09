@@ -39,11 +39,16 @@ jobs:
           [ "$ios_bundle" = "com.openreel.ios" ] || { echo "IDENTIFIER CHANGED: $ios_bundle"; exit 1; }
 
       - name: Install frontend dependencies
+        # --ignore-scripts: 跳过 apply-native-patches.mjs。
+        # 该脚本的 iOS 补丁（功能18）在干净 CI 环境里会把对未定义方法
+        # `isPortReachable` 的调用注入 expo-video-cache，导致 xcodebuild 编译失败；
+        # 而该补丁只是遥测/stopServer/端口探测等增强，非 app 运行必需。
+        # 跳过它后 expo-video-cache 用官方干净源码即可正常编译出可用 IPA。
         shell: bash
         run: |
           set -e
           for i in 1 2 3; do
-            if pnpm install --frozen-lockfile; then exit 0; fi
+            if pnpm install --frozen-lockfile --ignore-scripts; then exit 0; fi
             echo "pnpm install failed (attempt $i/3), retrying..."
             rm -rf node_modules
             pnpm store prune || true
