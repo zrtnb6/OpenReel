@@ -1,0 +1,125 @@
+name: Build iOS IPA (Unsigned)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: ios-ipa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-ios:
+    name: iOS IPA · Xcode 26 (macOS)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: pnpm
+
+      - name: Verify iOS bundle identifier
+        shell: bash
+        run: |
+          ios_bundle=$(node -p "require('./apps/mobile/app.json').expo.ios.bundleIdentifier")
+          echo "iOS bundleIdentifier = $ios_bundle"
+          [ "$ios_bundle" = "com.openreel.ios" ] || { echo "IDENTIFIER CHANGED: $ios_bundle"; exit 1; }
+
+      - name: Install frontend dependencies
+        shell: bash
+        run: |
+          set -e
+          for i in 1 2 3; do
+            if pnpm install --frozen-lockfile; then exit 0; fi
+            echo "pnpm install failed (attempt $i/3), retrying..."
+            rm -rf node_modules
+            pnpm store prune || true
+          done
+          exit 1
+
+      - name: Select Xcode 26
+        shell: bash
+        run: |
+          XCODE_APP=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
+          echo "Using Xcode: $XCODE_APP"
+          sudo xcode-select -s "$XCODE_APP"
+          xcodebuild -version
+
+      - name: Install CocoaPods
+        shell: bash
+        run: |
+          if ! command -v pod >/dev/null 2>&1; then
+            brew install cocoapods
+          fi
+          pod --version
+
+      - name: Install iOS Pods
+        working-directory: apps/mobile/ios
+        shell: bash
+        run: pod install
+
+      - name: Archive (unsigned)
+        working-directory: apps/mobile/ios
+        shell: bash
+        run: |
+          set -o pipefail
+          xcodebuild archive \
+            -workspace MovieApp.xcworkspace \
+            -scheme MovieApp \
+            -configuration Release \
+            -sdk iphoneos \
+            -archivePath "$PWD/build/MovieApp.xcarchive" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            DEVELOPMENT_TEAM="" \
+            > "$PWD/build/archive.log" 2>&1
+
+      - name: Show archive log (tail)
+        if: always()
+        working-directory: apps/mobile/ios
+        shell: bash
+        run: |
+          [ -f build/archive.log ] && tail -n 200 build/archive.log || echo "no log"
+
+      - name: Package unsigned IPA
+        working-directory: apps/mobile/ios
+        shell: bash
+        run: |
+          APP=$(find build/MovieApp.xcarchive/Products/Applications -maxdepth 1 -name '*.app' | head -n1)
+          [ -n "$APP" ] || { echo "APP bundle not found"; exit 1; }
+          echo "Found app: $APP"
+          rm -rf Payload
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -r "$GITHUB_WORKSPACE/OpenReel-iOS-unsigned.ipa" Payload
+          ls -lh "$GITHUB_WORKSPACE/OpenReel-iOS-unsigned.ipa"
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenReel-iOS-unsigned
+          path: OpenReel-iOS-unsigned.ipa
+          if-no-files-found: error
+
+      - name: Upload archive log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-archive-log
+          path: apps/mobile/ios/build/archive.log
+          if-no-files-found: ignore
